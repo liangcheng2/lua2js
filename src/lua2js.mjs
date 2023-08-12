@@ -40,7 +40,8 @@ function joinUnderscore(length) {
     return Array.from({ length }, () => "_").join("");
 }
 function toCamel(s) {
-    return s;
+    if (s === "var") return "varInfo";
+    else return s;
     // let status = -1;
     // let res = [];
     // let longUnderscoreCnt = 0;
@@ -137,8 +138,8 @@ function insertPrototypeNode(base) {
 }
 function isClassExtends(ast) {
     return (
-        ast.base.type == "Identifier" &&
-        ast.base.name == "class" &&
+        ast.base?.type == "Identifier" &&
+        ast.base?.name == "class" &&
         ast.arguments instanceof Array &&
         ast.arguments.length == 2
     );
@@ -251,9 +252,11 @@ function isLuaSystemFunc(ast) {
 function convertLuaSystemFunc(ast) {
     let libName = ast.base?.base?.name;
     let funcName = ast.base?.identifier?.name;
-    let convertName = `l2j.${libName}_${funcName}`;
-    l2jSystemFuncs.add(convertName);
-    return `${convertName}(${ast.arguments?.map(ast2js).join(", ")})`;
+    let convertName = `${libName}_${funcName}`;
+    if (!("l2j" in globalThis && convertName in globalThis.l2j)) {
+        l2jSystemFuncs.add(convertName);
+    }
+    return `l2j.${convertName}(${ast.arguments?.map(ast2js).join(", ")})`;
 }
 
 function isCustomLuaClassLocalDefine(ast) {
@@ -261,15 +264,17 @@ function isCustomLuaClassLocalDefine(ast) {
         astStack.length === 3 &&
         ast.variables?.length == 1 &&
         ast.init?.length == 1 &&
-        ((ast.init[0].type == "TableConstructorExpression" && ast.variables[0].name == "M") ||
-            (ast.init[0].type == "CallExpression" && ast.init[0].base?.name === "class"))
+        ((ast.init[0].type == "TableConstructorExpression" &&
+            ast.variables[0]?.name == "M" &&
+            ast.init[0]?.fields?.length === 0) ||
+            (ast.init[0]?.type == "CallExpression" && ast.init[0]?.base?.name === "class"))
     );
 }
 function convertCustomLuaClassFunc(ast) {
     if (ast.init[0].type == "TableConstructorExpression") {
-        return `let ${ast.variables[0].name} = l2j.createClass()`;
+        return `let ${ast.variables[0]?.name} = l2j.createClass()`;
     } else {
-        return `let ${ast.variables[0].name} = ${ast2js(ast.init[0])}`;
+        return `let ${ast.variables[0]?.name} = ${ast2js(ast.init[0])}`;
     }
 }
 
@@ -304,7 +309,8 @@ function processBeforeAst2Js(ast) {
     for (let i = lastLine + 1; i < astLine; i++) {
         if (commentData.length > 0 && commentData[0].loc.start.line === i) {
             let comment = commentData.shift();
-            ret += `//${comment.value}\n`;
+            if (comment.raw.indexOf("--[[") !== -1) ret += comment.raw.replace("--[[", "/*").replace("]]", "*/");
+            else ret += `//${comment.value}\n`;
         } else {
             ret += "\n";
         }
@@ -313,7 +319,7 @@ function processBeforeAst2Js(ast) {
     return ret;
 }
 function processAfterAst2Js(ast) {
-    let astLine = ast.loc?.end?.line || 9999999;
+    let astLine = ast.loc?.end?.line || 0;
 
     let ret = "";
     while (commentData.length > 0 && commentData[0].loc.start.line === astLine) {
@@ -405,9 +411,9 @@ function luaLiteral2Js(s) {
     let c = s[0];
     s = getLuaStringToken(s);
     if (c == "[") {
-        return "`" + s.replace("`", "\\`") + "`";
+        return "`" + s.replace(/\'/g, "\\`") + "`";
     } else {
-        return c + s + c;
+        return c + s.replace(/\'/g, "\\`") + c;
     }
 }
 function isReturnNilAndErr(ast) {
@@ -417,13 +423,14 @@ function luaFormat2JsTemplate(ast) {
     let s = getLuaStringToken(ast.arguments[0].raw);
 
     let tokens = formatTokenize(s);
-    let ret = "`";
+    let ret = "";
     let argIndex = 0;
     tokens.forEach((v) => {
         if (typeof v === "string") ret += v;
         else ret += "${" + ast2js(ast.arguments[++argIndex]) + "}";
     });
-    ret += "`";
+    // prettier-ignore
+    ret = "`" + ret.replace(/`/g, "\\`").replace(/'/g, "\\'") + "`";
     return ret;
 
     // let status = 0;
@@ -652,7 +659,23 @@ function ast2jsImp(ast, joiner) {
                         tagVarargAsSpread(ast.fields.map((e) => e.value));
                         return `[${ast2js(ast.fields, ", ")}]`;
                     } else {
-                        return `{${ast2js(ast.fields, ", ")}}`;
+                        // return `{${ast2js(ast.fields, ", ")}}`;
+                        let types = new Set();
+                        ast.fields.forEach((e) => types.add(e.type));
+                        if (types.size === 1) return `{${ast2js(ast.fields, ", ")}}`;
+                        else {
+                            let ret = "{";
+                            for (let i = 0; i < ast.fields.length; ++i) {
+                                if (ast.fields[i]?.type === "TableValue") {
+                                    ret += `${i + 1}: ${ast2js(ast.fields[i].value)}`;
+                                } else {
+                                    ret += ast2js(ast.fields[i]);
+                                }
+                                ret += i < ast.fields.length - 1 ? "," : "";
+                            }
+                            ret += "}";
+                            return ret;
+                        }
                     }
                 }
             case "TableKeyString":
@@ -811,7 +834,7 @@ function ast2jsImp(ast, joiner) {
                     return `${ast2js(ast.base)}(${ast.arguments.map(ast2js).join(", ")})`;
                 }
             case "TableCallExpression":
-                if (ast.base.type == "Identifier" && ast.base.name == "class") {
+                if (ast.base.type == "Identifier" && ast.base?.name == "class") {
                     ast.arguments.isClassMode = true;
                     if (ast.className) {
                         return `class ${ast.className} ${ast2js(ast.arguments)}`;
@@ -841,7 +864,7 @@ function ast2jsImp(ast, joiner) {
             case "ForGenericStatement":
                 let iter;
                 if (ast.iterators.length == 1) {
-                    let iter_name = ast.iterators[0].base.name;
+                    let iter_name = ast.iterators[0].base?.name;
                     if (iter_name == "ipairs") {
                         // iter = `${ast2js(ast.iterators[0].arguments)}.entries()`;
                         iter = `l2j.ipairs(${ast2js(ast.iterators[0].arguments)})`;
@@ -856,6 +879,8 @@ function ast2jsImp(ast, joiner) {
                 return `for (let ${smartPack(ast.variables)} of ${iter}) {${ast2js(ast.body)}}`;
             case "WhileStatement":
                 return `while (${ast2js(ast.condition)}) {${ast2js(ast.body)}}`;
+            case "RepeatStatement":
+                return `do {${ast2js(ast.body)}} while (${ast2js(ast.condition)})`;
             default:
                 throw new Error(`Unsupported AST node type: ${ast.type}`);
         }
@@ -871,7 +896,7 @@ function lua2ast(lua_code) {
     }
 }
 
-function lua2js(lua_code) {
+function lua2js(lua_code, source) {
     let js = "";
     try {
         let ast = lua2ast(lua_code);
@@ -879,7 +904,9 @@ function lua2js(lua_code) {
         js = ast2js(ast);
         return prettier.format(js, { parser: "babel", rules: { "no-debugger": "off" }, plugins: [parserBabel] });
     } catch (error) {
-        return `/*\n${error}\n*/\n${js}`;
+        let ret = `/*\n${error}\n*/\n${js}`;
+        console.error(`file: ${source}, error: ${error.message}`);
+        return ret;
     }
 }
 export { lua2ast, lua2js, ast2js, l2jSystemFuncs, l2jGlobalVars };
