@@ -1,6 +1,7 @@
 import luaparse from "luaparse";
 import prettier from "prettier/standalone.js";
 import parserBabel from "prettier/parser-babel.js";
+import formatTokenize from  '@stdlib/string-base-format-tokenize';
 
 function joinUnderscore(length) {
   return Array.from({ length }, () => '_').join("")
@@ -116,8 +117,8 @@ function isStringFormatCall(ast) {
         ast.base?.identifier?.name === "format" &&
         ast.base?.base?.name === "string")) &&
     ast.arguments.length > 1 &&
-    ast.arguments[0].type === "StringLiteral" &&
-    ast.arguments[0].raw.includes("%s")
+    ast.arguments[0].type === "StringLiteral"
+    // && ast.arguments[0].raw.includes("%s")
   );
 }
 function isTableInsertCall(ast) {
@@ -142,12 +143,15 @@ function isTableInsertAtHeadCall(ast) {
 function luaInsert2JsUnshift(ast) {
   // tansform lua table.insert(t, 1) / table_insert(t, 1) to js t.push(1)
   let [base, index, element] = ast.arguments;
-  return `${ast2js(base)}.unshift(${ast2js(element)})`;
+  // return `${ast2js(base)}.unshift(${ast2js(element)})`;
+  return `l2j.table_insert_at(${ast2js(base)}, ${ast2js(index)}, ${ast2js(element)})`
+
 }
 function luaInsert2JsPush(ast) {
   // tansform lua table.insert(t, 1) / table_insert(t, 1) to js t.push(1)
   let [base, element] = ast.arguments;
-  return `${ast2js(base)}.push(${ast2js(element)})`;
+  // return `${ast2js(base)}.push(${ast2js(element)})`;
+  return `l2j.table_insert(${ast2js(base)}, ${ast2js(element)})`
 }
 
 function isTableConcatCall(ast) {
@@ -272,29 +276,40 @@ function isReturnNilAndErr(ast) {
 }
 function luaFormat2JsTemplate(ast) {
   let s = getLuaStringToken(ast.arguments[0].raw);
-  let status = 0;
-  let res = [];
-  let j = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === "%") {
-      if (status === 0) {
-        status = 1;
-      } else if (status === 1) {
-        status = 0;
-        res.push(c);
-      }
-    } else if (c === "s" && status === 1) {
-      j = j + 1;
-      res.push("${" + ast2js(ast.arguments[j]) + "}");
-      status = 0;
-    } else if (c === "`") {
-      res.push("\\" + c);
-    } else {
-      res.push(c);
-    }
-  }
-  return "`" + res.join("") + "`";
+
+  let tokens = formatTokenize(s);
+  let ret = "`"
+  let argIndex = 0;
+  tokens.forEach((v)=>{
+    if(typeof(v) === "string") ret += v;
+    else ret += "${" + ast2js(ast.arguments[++argIndex]) + "}"
+  })
+  ret += "`"
+  return ret;
+
+  // let status = 0;
+  // let res = [];
+  // let j = 0;
+  // for (let i = 0; i < s.length; i++) {
+  //   const c = s[i];
+  //   if (c === "%") {
+  //     if (status === 0) {
+  //       status = 1;
+  //     } else if (status === 1) {
+  //       status = 0;
+  //       res.push(c);
+  //     }
+  //   } else if (c === "s" && status === 1) {
+  //     j = j + 1;
+  //     res.push("${" + ast2js(ast.arguments[j]) + "}");
+  //     status = 0;
+  //   } else if (c === "`") {
+  //     res.push("\\" + c);
+  //   } else {
+  //     res.push(c);
+  //   }
+  // }
+  // return "`" + res.join("") + "`";
 }
 function selfToThis(ast) {
   if (ast.type === "Identifier" && ast.name === "self") {
@@ -474,7 +489,8 @@ function ast2js(ast, joiner) {
           return `{${ast2js(ast.fields, "\n")}}`;
         } else if (ast.fields.length === 0) {
           // try guess from later code whether contains t[#t+1] or table.concat(t)
-          return '[]'
+          // return '[]'
+          return "{}"
         } else {
           let is_pure_array = ast.fields.every((e) => e.type == "TableValue");
           if (is_pure_array) {
