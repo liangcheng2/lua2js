@@ -1,7 +1,8 @@
 import luaparse from "luaparse";
 import prettier from "prettier/standalone.js";
 import parserBabel from "prettier/parser-babel.js";
-import formatTokenize from "@stdlib/string-base-format-tokenize";
+// import formatTokenize from "@stdlib/string-base-format-tokenize";
+// import formatInterpolate from "@stdlib/string-base-format-interpolate";
 
 // lch begin
 const LUA_SYSTEM_LIB = new Set(["table", "io", "string", "package", "math", "debug", "os", "utf8"]);
@@ -9,7 +10,6 @@ const LUA_SYSTEM_LIB = new Set(["table", "io", "string", "package", "math", "deb
 let l2jSystemFuncs = new Set();
 let l2jGlobalVars = new Set();
 let astStack = [];
-let localScopeStack = [];
 let commentData = [];
 let savedLastLineIndex = 0;
 
@@ -19,21 +19,7 @@ const LUA_PARSER_OPTIONS = {
     ranges: true,
     scope: true,
     luaVersion: "5.3",
-    onCreateScope: () => {
-        localScopeStack.push(new Set());
-    },
-    onDestroyScope: () => {
-        localScopeStack.pop();
-    },
-    onLocalDeclaration: (name) => {
-        localScopeStack[localScopeStack.length - 1].add(name);
-    },
 };
-function verifyGlobalVar(name) {
-    if (name === "this") return;
-    if (name === undefined || localScopeStack.some((scope) => scope.has(name))) return;
-    l2jGlobalVars.add(name);
-}
 // lch end
 
 function joinUnderscore(length) {
@@ -41,6 +27,9 @@ function joinUnderscore(length) {
 }
 function toCamel(s) {
     if (s === "var") return "varInfo";
+    else if (s === "super") return "varSuper";
+    else if (s === "new") return "varNew";
+    else if (s === "import") return "varImport";
     else return s;
     // let status = -1;
     // let res = [];
@@ -309,8 +298,7 @@ function processBeforeAst2Js(ast) {
     for (let i = lastLine + 1; i < astLine; i++) {
         if (commentData.length > 0 && commentData[0].loc.start.line === i) {
             let comment = commentData.shift();
-            if (comment.raw.indexOf("--[[") !== -1) ret += comment.raw.replace("--[[", "/*").replace("]]", "*/");
-            else ret += `//${comment.value}\n`;
+            ret += comment.raw.replace("--[[", "/*").replace("]]", "*/").replace("--", `//`) + "\n";
         } else {
             ret += "\n";
         }
@@ -420,42 +408,51 @@ function isReturnNilAndErr(ast) {
     return ast.arguments?.length == 2 && ast.arguments[0].type == "NilLiteral";
 }
 function luaFormat2JsTemplate(ast) {
-    let s = getLuaStringToken(ast.arguments[0].raw);
-
-    let tokens = formatTokenize(s);
-    let ret = "";
-    let argIndex = 0;
-    tokens.forEach((v) => {
-        if (typeof v === "string") ret += v;
-        else ret += "${" + ast2js(ast.arguments[++argIndex]) + "}";
-    });
-    // prettier-ignore
-    ret = "`" + ret.replace(/`/g, "\\`").replace(/'/g, "\\'") + "`";
+    let ret = `l2j.string_format(${ast.arguments[0].raw},`;
+    for (let i = 1; i < ast.arguments.length; i++) {
+        ret += ast2js(ast.arguments[i]);
+        ret += i < ast.arguments.length - 1 ? "," : "";
+    }
+    ret += ")";
     return ret;
+
+    // let s = getLuaStringToken(ast.arguments[0].raw);
+
+    // let tokens = formatTokenize(s);
+    // let ret = "";
+    // let argIndex = 0;
+    // tokens.forEach((v) => {
+    //     if (typeof v === "string") ret += v;
+    //     else ret += "${" + ast2js(ast.arguments[argIndex++]) + "}";
+    // });
+    // // prettier-ignore
+    // ret = "`" + ret.replace(/`/g, "\\`").replace(/'/g, "\\'") + "`";
+    // return ret;
 
     // let status = 0;
     // let res = [];
     // let j = 0;
     // for (let i = 0; i < s.length; i++) {
-    //   const c = s[i];
-    //   if (c === "%") {
-    //     if (status === 0) {
-    //       status = 1;
-    //     } else if (status === 1) {
-    //       status = 0;
-    //       res.push(c);
+    //     const c = s[i];
+    //     if (c === "%") {
+    //         if (status === 0) {
+    //             status = 1;
+    //         } else if (status === 1) {
+    //             status = 0;
+    //             res.push(c);
+    //         }
+    //     } else if (c === "s" && status === 1) {
+    //         j = j + 1;
+    //         res.push("${" + ast2js(ast.arguments[j]) + "}");
+    //         status = 0;
+    //     } else if (c === "`") {
+    //         res.push("\\" + c);
+    //     } else {
+    //         res.push(c);
     //     }
-    //   } else if (c === "s" && status === 1) {
-    //     j = j + 1;
-    //     res.push("${" + ast2js(ast.arguments[j]) + "}");
-    //     status = 0;
-    //   } else if (c === "`") {
-    //     res.push("\\" + c);
-    //   } else {
-    //     res.push(c);
-    //   }
     // }
-    // return "`" + res.join("") + "`";
+    // res = "`" + res.join("").replace(/`/g, "\\`").replace(/'/g, "\\'") + "`";
+    // return res;
 }
 function selfToThis(ast) {
     if (ast.type === "Identifier" && ast.name === "self") {
@@ -830,7 +827,6 @@ function ast2jsImp(ast, joiner) {
                     return `${ast2js(ast.base)}.call(this${rest.length > 0 ? ", " : ""}${rest.map(ast2js).join(", ")})`;
                 } else {
                     tagVarargAsSpread(ast.arguments);
-                    verifyGlobalVar(ast.base?.base?.name);
                     return `${ast2js(ast.base)}(${ast.arguments.map(ast2js).join(", ")})`;
                 }
             case "TableCallExpression":
@@ -900,6 +896,7 @@ function lua2js(lua_code, source) {
     let js = "";
     try {
         let ast = lua2ast(lua_code);
+        if (ast.globals?.length > 0) for (let v of ast.globals) l2jGlobalVars.add(v.name);
         createCommentData(ast);
         js = ast2js(ast);
         return prettier.format(js, { parser: "babel", rules: { "no-debugger": "off" }, plugins: [parserBabel] });
