@@ -9,9 +9,11 @@ const LUA_SYSTEM_LIB = new Set(["table", "io", "string", "package", "math", "deb
 
 let l2jSystemFuncs = new Set();
 let l2jGlobalVars = new Set();
+let l2jInitedGlobalVars = new Set();
 let astStack = [];
 let commentData = [];
 let savedLastLineIndex = 0;
+let localVarStacks = [];
 
 const LUA_PARSER_OPTIONS = {
     comments: true,
@@ -19,7 +21,25 @@ const LUA_PARSER_OPTIONS = {
     ranges: true,
     scope: true,
     luaVersion: "5.3",
+    // onCreateScope: () => {
+    //     localStacks.push(new Set());
+    // },
+    // onDestroyScope: () => {
+    //     localStacks.pop();
+    // },
+    // onLocalDeclaration: (name) => {
+    //     localStacks[localStacks.length - 1].add(name);
+    // },
 };
+
+function isLocalVar(name) {
+    for (let i = localVarStacks.length - 1; i >= 0; i--) {
+        if (localVarStacks[i].has(name)) {
+            return true;
+        }
+    }
+    return false;
+}
 // lch end
 
 function joinUnderscore(length) {
@@ -304,9 +324,13 @@ function processBeforeAst2Js(ast) {
         }
     }
 
+    localVarStacks.push(new Set());
+
     return ret;
 }
 function processAfterAst2Js(ast) {
+    localVarStacks.pop();
+
     let astLine = ast.loc?.end?.line || 0;
 
     let ret = "";
@@ -582,6 +606,9 @@ function ast2jsImp(ast, joiner) {
                 return `{${ast2js(ast.body)}}`;
             case "AssignmentStatement":
             case "LocalStatement":
+                if (ast.type === "LocalStatement") {
+                    ast.variables.forEach((v) => localVarStacks[localVarStacks.length - 1].add(v));
+                }
                 if (isCustomLuaClassLocalDefine(ast)) {
                     return convertCustomLuaClassFunc(ast);
                 }
@@ -597,7 +624,14 @@ function ast2jsImp(ast, joiner) {
                     case 0:
                         return `${scopePrefix}${ast2js(ast.variables, ", ")}`;
                     case 1:
-                        return `${scopePrefix}${smartPack(ast.variables)} = ${ast2js(ast.init[0])}`;
+                        let v = smartPack(ast.variables);
+                        // if (!isLocalVar(v)) scopePrefix = `globalThis.`;
+                        if (l2jGlobalVars.has(v)) {
+                            scopePrefix = `globalThis.`;
+                            // if (l2jInitedGlobalVars.has(v)) throw new Error(`duplicated global var inited: ${v}`);
+                            l2jInitedGlobalVars.add(v);
+                        }
+                        return `${scopePrefix}${v} = ${ast2js(ast.init[0])}`;
                     default:
                         tagVarargAsSpread(ast.init);
                         return `${scopePrefix}${smartPack(ast.variables)} = ${smartPack(ast.init)}`;
@@ -608,7 +642,8 @@ function ast2jsImp(ast, joiner) {
                     case "not":
                         return `!${exp}`;
                     case "#":
-                        return `(${exp}).length`;
+                        // return `(${exp}).length`;
+                        return `l2j.string_len(${exp})`;
                     default:
                         return `${ast.operator}${exp}`;
                 }
@@ -906,4 +941,4 @@ function lua2js(lua_code, source) {
         return ret;
     }
 }
-export { lua2ast, lua2js, ast2js, l2jSystemFuncs, l2jGlobalVars };
+export { lua2ast, lua2js, ast2js, l2jSystemFuncs, l2jGlobalVars, l2jInitedGlobalVars };
