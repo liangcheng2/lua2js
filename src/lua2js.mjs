@@ -1,6 +1,7 @@
 import luaparse from "luaparse";
 import prettier from "prettier/standalone.js";
 import parserBabel from "prettier/parser-babel.js";
+import { ast } from "luaparse";
 // import formatTokenize from "@stdlib/string-base-format-tokenize";
 // import formatInterpolate from "@stdlib/string-base-format-interpolate";
 
@@ -14,6 +15,7 @@ let astStack = [];
 let commentData = [];
 let savedLastLineIndex = 0;
 let localVarStacks = [];
+let replaceOperatorToFunc = false;
 
 const LUA_PARSER_OPTIONS = {
     comments: true,
@@ -31,15 +33,6 @@ const LUA_PARSER_OPTIONS = {
     //     localStacks[localStacks.length - 1].add(name);
     // },
 };
-
-function isLocalVar(name) {
-    for (let i = localVarStacks.length - 1; i >= 0; i--) {
-        if (localVarStacks[i].has(name)) {
-            return true;
-        }
-    }
-    return false;
-}
 // lch end
 
 function joinUnderscore(length) {
@@ -339,6 +332,44 @@ function processAfterAst2Js(ast) {
         ret += `//${comment.value}\n`;
     }
     return ret;
+}
+
+function verifyOperationConfig(sourcePath) {
+    // 写死路径
+    if (sourcePath === undefined) return;
+    sourcePath = sourcePath.replace(/\\/g, "/");
+    replaceOperatorToFunc =
+        sourcePath.indexOf("DataCenter") == -1 &&
+        sourcePath.indexOf("battleLog") == -1 &&
+        (sourcePath.indexOf("Battle/") >= 0 || sourcePath.indexOf("BattleView/") >= 0);
+}
+
+function isASTLeftOrRightType(ast, type) {
+    return ast.left?.type === type || ast.right?.type === type;
+}
+
+function verifyBinaryExpression(ast, op) {
+    if (!replaceOperatorToFunc) return;
+    if (isASTLeftOrRightType(ast, "StringLiteral")) return;
+
+    switch (op) {
+        case "+":
+            if (!isASTLeftOrRightType(ast, "NumericLiteral")) return "l2j.add";
+        case "-":
+            if (!isASTLeftOrRightType(ast, "NumericLiteral")) return "l2j.sub";
+        case "*":
+            return "l2j.mul";
+        case "/":
+            return "l2j.div";
+        case "==":
+            if (!isASTLeftOrRightType(ast, "NumericLiteral")) return "l2j.eq";
+    }
+}
+
+function verifyUnaryExpression(op) {
+    if (!replaceOperatorToFunc) return;
+
+    if (op === "-") return "l2j.neg";
 }
 // lch end
 
@@ -645,9 +676,18 @@ function ast2jsImp(ast, joiner) {
                         // return `(${exp}).length`;
                         return `l2j.string_len(${exp})`;
                     default:
+                        // lch begin
+                        let funcName = verifyUnaryExpression(ast.operator);
+                        if (funcName) return `${funcName}(${exp})`;
+                        // lch end
                         return `${ast.operator}${exp}`;
                 }
             case "BinaryExpression":
+                // lch begin
+                let funcName = verifyBinaryExpression(ast, binaryOpMap[ast.operator] || ast.operator);
+                if (funcName) return `${funcName}(${ast2js(ast.left)}, ${ast2js(ast.right)})`;
+                // lch end
+
                 ast.left.isBinaryExpressionMode = true;
                 ast.right.isBinaryExpressionMode = true;
                 return `(${ast2js(ast.left)} ${binaryOpMap[ast.operator] || ast.operator} ${ast2js(ast.right)})`;
@@ -931,8 +971,13 @@ function lua2js(lua_code, source) {
     let js = "";
     try {
         let ast = lua2ast(lua_code);
+
+        // lch begin
+        verifyOperationConfig(source);
         if (ast.globals?.length > 0) for (let v of ast.globals) l2jGlobalVars.add(v.name);
         createCommentData(ast);
+        // lch end
+
         js = ast2js(ast);
         return prettier.format(js, { parser: "babel", rules: { "no-debugger": "off" }, plugins: [parserBabel] });
     } catch (error) {
