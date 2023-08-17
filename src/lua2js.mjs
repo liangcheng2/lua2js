@@ -16,6 +16,7 @@ let commentData = [];
 let savedLastLineIndex = 0;
 let localVarStacks = [];
 let replaceOperatorToFunc = false;
+let exportAsESM = true;
 
 const LUA_PARSER_OPTIONS = {
     comments: true,
@@ -845,7 +846,11 @@ function ast2jsImp(ast, joiner) {
                 }
                 tagVarargAsSpread(ast.arguments);
                 if (ast.asExport) {
-                    return `export default ${smartPack(ast.arguments)}`;
+                    if (exportAsESM) {
+                        return `export default ${smartPack(ast.arguments)}`;
+                    } else {
+                        return `exports.default = ${smartPack(ast.arguments)}`;
+                    }
                 } else {
                     return `return ${smartPack(ast.arguments)}`;
                 }
@@ -967,12 +972,13 @@ function lua2ast(lua_code) {
     }
 }
 
-function lua2js(lua_code, source) {
+function lua2js(lua_code, source, asESM) {
     let js = "";
     try {
         let ast = lua2ast(lua_code);
 
         // lch begin
+        if (asESM !== undefined) exportAsESM = asESM;
         verifyOperationConfig(source);
         if (ast.globals?.length > 0) for (let v of ast.globals) l2jGlobalVars.add(v.name);
         createCommentData(ast);
