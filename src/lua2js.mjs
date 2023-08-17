@@ -662,8 +662,12 @@ function ast2jsImp(ast, joiner) {
                             scopePrefix = `globalThis.`;
                             // if (l2jInitedGlobalVars.has(v)) throw new Error(`duplicated global var inited: ${v}`);
                             l2jInitedGlobalVars.add(v);
+                            let value = ast2js(ast.init[0]);
+                            if (value === "{}") value = "l2j.createClass()";
+                            return `${scopePrefix}${v} = ${value}`;
+                        } else {
+                            return `${scopePrefix}${v} = ${ast2js(ast.init[0])}`;
                         }
-                        return `${scopePrefix}${v} = ${ast2js(ast.init[0])}`;
                     default:
                         tagVarargAsSpread(ast.init);
                         return `${scopePrefix}${smartPack(ast.variables)} = ${smartPack(ast.init)}`;
