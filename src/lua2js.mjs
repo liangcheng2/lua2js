@@ -2,11 +2,35 @@ import luaparse from "luaparse";
 import prettier from "prettier/standalone.js";
 import parserBabel from "prettier/parser-babel.js";
 import { ast } from "luaparse";
+import * as path from "path";
 // import formatTokenize from "@stdlib/string-base-format-tokenize";
 // import formatInterpolate from "@stdlib/string-base-format-interpolate";
 
 // lch begin
-const LUA_SYSTEM_LIB = new Set(["table", "io", "string", "package", "math", "debug", "os", "utf8"]);
+let LUA_SYSTEM_LIB = new Set(["table", "io", "string", "package", "math", "debug", "os", "utf8", "rapidjson"]);
+
+let LUA_GLOBAL_LIB = new Set(
+    Array.from(LUA_SYSTEM_LIB).concat([
+        "_G",
+        "setmetatable",
+        "rawget",
+        "rawset",
+        "rawlen",
+        "type",
+        "assert",
+        "__VERSION",
+        "dofile",
+        "error",
+        "getmetatable",
+        "tonumber",
+        "tostring",
+        "xpcall",
+        "pcall",
+        "pairs",
+        "print",
+        "next",
+    ])
+);
 
 let l2jSystemFuncs = new Set();
 let l2jGlobalVars = new Set();
@@ -17,6 +41,10 @@ let savedLastLineIndex = 0;
 let localVarStacks = [];
 let replaceOperatorToFunc = false;
 let exportAsESM = true;
+let hasModuleDefined = false;
+let globalVarNeedDefine = undefined;
+let sourceFilePath;
+let scopeStack = [];
 
 const LUA_PARSER_OPTIONS = {
     comments: true,
@@ -24,16 +52,60 @@ const LUA_PARSER_OPTIONS = {
     ranges: true,
     scope: true,
     luaVersion: "5.3",
-    // onCreateScope: () => {
-    //     localStacks.push(new Set());
-    // },
-    // onDestroyScope: () => {
-    //     localStacks.pop();
-    // },
+    onCreateScope: () => {
+        scopeStack.push(new Map());
+    },
+    onDestroyScope: () => {
+        scopeStack.pop();
+    },
     // onLocalDeclaration: (name) => {
-    //     localStacks[localStacks.length - 1].add(name);
+    //     console.log(`localDeclaration: ${name}`);
+
+    //     // localStacks[localStacks.length - 1].add(name);
     // },
+    onCreateNode: (node) => {
+        //console.log(`creteNode: ${node.type}`);
+        if (node.type === "LocalStatement") {
+            let infos = scopeStack[scopeStack.length - 1];
+            node.variables.forEach((v) => {
+                if (v.type !== "Identifier") return;
+                let name = v.name;
+                let found = infos.get(name);
+                if (found !== undefined) {
+                    if (name === "_") {
+                        // _变量直接给替换掉
+                        v.name = `_${++found}`;
+                        infos.set(name, found);
+                    } else {
+                        node.duplicated = true;
+                    }
+                } else {
+                    infos.set(name, 0);
+                }
+            });
+        }
+    },
 };
+
+function initGlobalVars(source, ast, asESM) {
+    astStack = [];
+    commentData = [];
+    savedLastLineIndex = 0;
+    localVarStacks = [];
+    replaceOperatorToFunc = false;
+    exportAsESM = true;
+    hasModuleDefined = false;
+    globalVarNeedDefine = undefined;
+
+    sourceFilePath = source;
+    if (asESM !== undefined) exportAsESM = asESM;
+
+    verifyOperationConfig(source);
+    if (ast.globals?.length > 0) {
+        for (let v of ast.globals) if (!LUA_GLOBAL_LIB.has(v)) l2jGlobalVars.add(v.name);
+    }
+    createCommentData(ast);
+}
 // lch end
 
 function joinUnderscore(length) {
@@ -44,7 +116,10 @@ function toCamel(s) {
     else if (s === "super") return "varSuper";
     else if (s === "new") return "varNew";
     else if (s === "import") return "varImport";
-    else return s;
+    else if (s === "package") return "varPackage";
+    // else if (s === "type") return "varType";
+    // else if (LUA_GLOBAL_LIB.has(s)) return `l2j_${s}`;
+    return s;
     // let status = -1;
     // let res = [];
     // let longUnderscoreCnt = 0;
@@ -190,13 +265,13 @@ function luaInsert2JsUnshift(ast) {
     // tansform lua table.insert(t, 1) / table_insert(t, 1) to js t.push(1)
     let [base, index, element] = ast.arguments;
     // return `${ast2js(base)}.unshift(${ast2js(element)})`;
-    return `l2j.table_insert_at(${ast2js(base)}, ${ast2js(index)}, ${ast2js(element)})`;
+    return `l2j.table.insert_at(${ast2js(base)}, ${ast2js(index)}, ${ast2js(element)})`;
 }
 function luaInsert2JsPush(ast) {
     // tansform lua table.insert(t, 1) / table_insert(t, 1) to js t.push(1)
     let [base, element] = ast.arguments;
     // return `${ast2js(base)}.push(${ast2js(element)})`;
-    return `l2j.table_insert(${ast2js(base)}, ${ast2js(element)})`;
+    return `l2j.table.insert(${ast2js(base)}, ${ast2js(element)})`;
 }
 
 function isTableConcatCall(ast) {
@@ -211,7 +286,7 @@ function isTableConcatCall(ast) {
 function luaConcat2JsJoin(ast) {
     // tansform lua table.concat(t, ',') / table_concat(t, ',') to js t.join(',')
     // return `${ast2js(ast.arguments[0])}.join(${ast.arguments[1] ? ast2js(ast.arguments[1]) : '""'})`;
-    return `l2j.table_concat(${ast2js(ast.arguments[0])}, ${ast.arguments[1] ? ast2js(ast.arguments[1]) : '""'})`;
+    return `l2j.table.concat(${ast2js(ast.arguments[0])}, ${ast.arguments[1] ? ast2js(ast.arguments[1]) : '""'})`;
 }
 function isInstanceMethod(ast) {
     return (
@@ -255,7 +330,7 @@ function isLuaSystemFunc(ast) {
 function convertLuaSystemFunc(ast) {
     let libName = ast.base?.base?.name;
     let funcName = ast.base?.identifier?.name;
-    let convertName = `${libName}_${funcName}`;
+    let convertName = `${libName}.${funcName}`;
     if (!("l2j" in globalThis && convertName in globalThis.l2j)) {
         l2jSystemFuncs.add(convertName);
     }
@@ -289,9 +364,8 @@ function convertCustomClassCall(ast) {
 }
 
 function createCommentData(ast) {
-    if (ast.comments === undefined) {
-        commentData = [];
-    } else {
+    commentData = [];
+    if (ast.comments !== undefined) {
         commentData = Array.from(ast.comments);
         commentData.sort((a, b) => {
             let lineDelta = a.loc.start.line - b.loc.start.line;
@@ -464,7 +538,7 @@ function isReturnNilAndErr(ast) {
     return ast.arguments?.length == 2 && ast.arguments[0].type == "NilLiteral";
 }
 function luaFormat2JsTemplate(ast) {
-    let ret = `l2j.string_format(${ast.arguments[0].raw},`;
+    let ret = `l2j.string.format(${ast.arguments[0].raw},`;
     for (let i = 1; i < ast.arguments.length; i++) {
         ret += ast2js(ast.arguments[i]);
         ret += i < ast.arguments.length - 1 ? "," : "";
@@ -638,8 +712,23 @@ function ast2jsImp(ast, joiner) {
                 return `{${ast2js(ast.body)}}`;
             case "AssignmentStatement":
             case "LocalStatement":
+                let duplicatedDeclare = false;
                 if (ast.type === "LocalStatement") {
-                    ast.variables.forEach((v) => localVarStacks[localVarStacks.length - 1].add(v));
+                    duplicatedDeclare = ast.duplicated;
+                    for (let varIndex = 0; varIndex < ast.variables.length; ++varIndex) {
+                        let name = ast.variables[varIndex].name;
+                        for (let i = localVarStacks.length - 1; i >= 0; i--) {
+                            if (localVarStacks[i].has(name)) {
+                                if (name === "_") {
+                                    ast.variables[varIndex].name = `_${varIndex}`;
+                                } else {
+                                    duplicatedDeclare = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!duplicatedDeclare) localVarStacks[localVarStacks.length - 1].add(name);
+                    }
                 }
                 if (isCustomLuaClassLocalDefine(ast)) {
                     return convertCustomLuaClassFunc(ast);
@@ -651,26 +740,71 @@ function ast2jsImp(ast, joiner) {
                 if (isTableInsert(ast)) {
                     return `${ast2js(ast.variables[0].base)}.push(${ast2js(ast.init)})`;
                 }
+                let value;
                 let scopePrefix = ast.type === "LocalStatement" ? "let " : "";
+                if (duplicatedDeclare) {
+                    if (ast.variables.length === 1) scopePrefix = "";
+                    else
+                        console.error(
+                            `duplicated declare ${ast2js(ast.variables)
+                                .replaceAll(";", ", ")
+                                .replaceAll("\n", "")} in ${sourceFilePath}`
+                        );
+                }
                 switch (ast.init.length) {
                     case 0:
                         return `${scopePrefix}${ast2js(ast.variables, ", ")}`;
                     case 1:
                         let v = smartPack(ast.variables);
+                        value = ast2js(ast.init[0]);
+                        let needCreateClass = false;
                         // if (!isLocalVar(v)) scopePrefix = `globalThis.`;
-                        if (l2jGlobalVars.has(v)) {
+                        if (
+                            l2jGlobalVars.has(v) &&
+                            !LUA_GLOBAL_LIB.has(v) &&
+                            !LUA_GLOBAL_LIB.has(value) &&
+                            v !== value
+                        ) {
                             scopePrefix = `globalThis.`;
+                            needCreateClass = value.indexOf("l2j.require") < 0;
+
+                            // if (value.indexOf("l2j.require") >= 0) {
+                            //     // require出来的直接赋值
+                            //     scopePrefix = `globalThis.`;
+                            // } else {
+                            //     if (globalVarNeedDefine !== undefined)
+                            //         throw new Error(
+                            //             "duplicated global var inited: " + v + " and " + globalVarNeedDefine + ""
+                            //         );
+                            //     globalVarNeedDefine = v;
+                            //     scopePrefix = "let ";
+                            // }
                             // if (l2jInitedGlobalVars.has(v)) throw new Error(`duplicated global var inited: ${v}`);
                             l2jInitedGlobalVars.add(v);
-                            let value = ast2js(ast.init[0]);
-                            if (value === "{}") value = "l2j.createClass()";
-                            return `${scopePrefix}${v} = ${value}`;
+                        }
+
+                        if (LUA_SYSTEM_LIB.has(value)) {
+                            value = `l2j.${value}`;
+                        }
+
+                        // 如果文件名和定义的local名一样，则认为是class
+                        if (
+                            v === "M" ||
+                            v == path.basename(sourceFilePath).replace(path.extname(sourceFilePath), "") ||
+                            // !hasModuleDefined) ||
+                            needCreateClass
+                        ) {
+                            // hasModuleDefined = true;
+                            return `${scopePrefix}${v} = l2j.createClass(${value})`;
                         } else {
-                            return `${scopePrefix}${v} = ${ast2js(ast.init[0])}`;
+                            if (LUA_GLOBAL_LIB.has(value) || value === v) value = `globalThis.${value}`;
+                            return `${scopePrefix}${v} = ${value}`;
                         }
                     default:
                         tagVarargAsSpread(ast.init);
-                        return `${scopePrefix}${smartPack(ast.variables)} = ${smartPack(ast.init)}`;
+                        value = smartPack(ast.init);
+                        if (LUA_GLOBAL_LIB.has(value)) value = `globalThis.${value}`;
+                        return `${scopePrefix}${smartPack(ast.variables)} = ${value}`;
                 }
             case "UnaryExpression":
                 let exp = ast2js(ast.argument);
@@ -828,6 +962,10 @@ function ast2jsImp(ast, joiner) {
                         ast.parameters = ast.parameters.slice(1);
                         traverseAst(ast.body, clsToThis);
                     }
+
+                    ast.parameters.forEach((v) => {
+                        localVarStacks[localVarStacks.length - 1].add(v.name);
+                    });
                     let main = `(${ast.parameters.map(ast2js).join(", ")}){${ast2js(ast.body)}}`;
                     if (ast.identifier == null) {
                         return `function ${main}`;
@@ -843,13 +981,28 @@ function ast2jsImp(ast, joiner) {
                 }
             case "MemberExpression":
                 // let hide_self = ast.indexer == ":";
-                return `${ast2js(ast.base)}.${ast2js(ast.identifier)}`;
+                let base = ast2js(ast.base);
+                let identifier = ast2js(ast.identifier);
+                if (LUA_SYSTEM_LIB.has(base)) return `l2j.${base}.${identifier}`;
+                return `${base}.${identifier}`;
+
             case "ReturnStatement":
                 if (isReturnNilAndErr(ast)) {
                     return `throw new Error(${ast2js(ast.arguments[1])})`;
                 }
                 tagVarargAsSpread(ast.arguments);
                 if (ast.asExport) {
+                    // lch begin
+                    // let ret = "";
+                    // let returnValues = smartPack(ast.arguments);
+                    // if (globalVarNeedDefine !== undefined) {
+                    //     ret += `globalThis.${globalVarNeedDefine} = l2j.newInstance(${globalVarNeedDefine})\n`;
+                    //     returnValues = `globalThis.${globalVarNeedDefine}`;
+                    // } else {
+                    //     returnValues = `l2j.newInstance(${returnValues})`;
+                    // }
+                    // lch end
+
                     if (exportAsESM) {
                         return `export default ${smartPack(ast.arguments)}`;
                     } else {
@@ -979,13 +1132,11 @@ function lua2ast(lua_code) {
 function lua2js(lua_code, source, asESM) {
     let js = "";
     try {
+        scopeStack = [];
         let ast = lua2ast(lua_code);
 
         // lch begin
-        if (asESM !== undefined) exportAsESM = asESM;
-        verifyOperationConfig(source);
-        if (ast.globals?.length > 0) for (let v of ast.globals) l2jGlobalVars.add(v.name);
-        createCommentData(ast);
+        initGlobalVars(source, ast, asESM);
         // lch end
 
         js = ast2js(ast);
