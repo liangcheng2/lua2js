@@ -59,6 +59,7 @@ let hasModuleDefined = false;
 let globalVarNeedDefine = undefined;
 let sourceFilePath;
 let scopeStack = [];
+let declaredClasses = new Set();
 
 const LUA_PARSER_OPTIONS = {
     comments: true,
@@ -110,6 +111,7 @@ function initGlobalVars(source, ast, asESM) {
     exportAsESM = true;
     hasModuleDefined = false;
     globalVarNeedDefine = undefined;
+    declaredClasses = new Set();
 
     sourceFilePath = source;
     if (asESM !== undefined) exportAsESM = asESM;
@@ -363,11 +365,14 @@ function isCustomLuaClassLocalDefine(ast) {
     );
 }
 function convertCustomLuaClassFunc(ast) {
+    let ret;
     if (ast.init[0].type == "TableConstructorExpression") {
-        return `let ${ast.variables[0]?.name} = l2j.createClass()`;
+        ret = `let ${ast.variables[0]?.name} = l2j.createClass()`;
     } else {
-        return `let ${ast.variables[0]?.name} = ${ast2js(ast.init[0])}`;
+        ret = `let ${ast.variables[0]?.name} = ${ast2js(ast.init[0])}`;
     }
+    if (ret.indexOf("l2j.createClass")) declaredClasses.add(ast.variables[0]?.name);
+    return ret;
 }
 
 function isCustomClassCall(ast) {
@@ -705,6 +710,10 @@ function ast2js(ast, joiner) {
     astStack.pop();
     return ret;
 }
+function isTopScope() {
+    return astStack.length <= 3;
+}
+
 function ast2jsImp(ast, joiner) {
     try {
         if (ast instanceof Array) {
@@ -812,20 +821,25 @@ function ast2jsImp(ast, joiner) {
                         ) {
                             hasModuleDefined = true;
                             if (
+                                !isTopScope() ||
                                 init0 === "M" ||
                                 init0.startsWith("setmetatable") ||
-                                (init0 === fileName && vars === "M")
-                            )
+                                (init0 === fileName && vars === "M") ||
+                                init0 === `undefined`
+                            ) {
                                 return `${scopePrefix}${vars} = ${init0}`;
-                            else return `${scopePrefix}${vars} = l2j.createClass(${init0})`;
+                            } else {
+                                declaredClasses.add(vars);
+                                return `${scopePrefix}${vars} = l2j.createClass(${init0})`;
+                            }
                         } else {
                             if (LUA_GLOBAL_LIB.has(init0) || init0 === vars) init0 = `globalThis.${init0}`;
                             else if (init0.startsWith("l2j.string.find")) {
                                 if (!vars.startsWith(`[`)) vars = `[${vars}]`;
                                 init0 = init0.replace(`l2j.string.find`, `l2j.string.findWithRet`);
                             }
-                            return `${scopePrefix}${vars} = ${init0}`;
                         }
+                        return `${scopePrefix}${vars} = ${init0}`;
                     default:
                         tagVarargAsSpread(ast.init);
                         let init = smartPack(ast.init).replace(`l2j.string.find`, `l2j.string.findWithRet`);
@@ -1019,20 +1033,17 @@ function ast2jsImp(ast, joiner) {
                 tagVarargAsSpread(ast.arguments);
                 if (ast.asExport) {
                     // lch begin
-                    // let ret = "";
-                    // let returnValues = smartPack(ast.arguments);
-                    // if (globalVarNeedDefine !== undefined) {
-                    //     ret += `globalThis.${globalVarNeedDefine} = l2j.newInstance(${globalVarNeedDefine})\n`;
-                    //     returnValues = `globalThis.${globalVarNeedDefine}`;
-                    // } else {
-                    //     returnValues = `l2j.newInstance(${returnValues})`;
-                    // }
+                    // 处理class
+                    let ret = "";
+                    for (let c of declaredClasses) {
+                        ret += `l2j.finishClass(${c});\n`;
+                    }
                     // lch end
 
                     if (exportAsESM) {
-                        return `export default ${smartPack(ast.arguments)}`;
+                        return ret + `export default ${smartPack(ast.arguments)}`;
                     } else {
-                        return `exports.default = ${smartPack(ast.arguments)}`;
+                        return ret + `exports.default = ${smartPack(ast.arguments)}`;
                     }
                 } else {
                     return `return ${smartPack(ast.arguments)}`;
