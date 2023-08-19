@@ -32,6 +32,20 @@ let LUA_GLOBAL_LIB = new Set(
     ])
 );
 
+let LUA_META_CALLER = new Set([
+    "Vector3",
+    "FixQuaternion",
+    "FixVector3",
+    "Bounds",
+    "Color",
+    "LayerMask",
+    "Plane",
+    "Quaternion",
+    "Ray",
+    "Vector2",
+    "Vector4",
+]);
+
 let l2jSystemFuncs = new Set();
 let l2jGlobalVars = new Set();
 let l2jInitedGlobalVars = new Set();
@@ -740,7 +754,7 @@ function ast2jsImp(ast, joiner) {
                 if (isTableInsert(ast)) {
                     return `${ast2js(ast.variables[0].base)}.push(${ast2js(ast.init)})`;
                 }
-                let value;
+                let init0;
                 let scopePrefix = ast.type === "LocalStatement" ? "let " : "";
                 if (duplicatedDeclare) {
                     if (ast.variables.length === 1) scopePrefix = "";
@@ -751,22 +765,23 @@ function ast2jsImp(ast, joiner) {
                                 .replaceAll("\n", "")} in ${sourceFilePath}`
                         );
                 }
+
+                let vars = smartPack(ast.variables);
                 switch (ast.init.length) {
                     case 0:
                         return `${scopePrefix}${ast2js(ast.variables, ", ")}`;
                     case 1:
-                        let v = smartPack(ast.variables);
-                        value = ast2js(ast.init[0]);
+                        init0 = ast2js(ast.init[0]);
                         let needCreateClass = false;
                         // if (!isLocalVar(v)) scopePrefix = `globalThis.`;
                         if (
-                            l2jGlobalVars.has(v) &&
-                            !LUA_GLOBAL_LIB.has(v) &&
-                            !LUA_GLOBAL_LIB.has(value) &&
-                            v !== value
+                            (l2jGlobalVars.has(vars) || LUA_META_CALLER.has(vars)) &&
+                            !LUA_GLOBAL_LIB.has(vars) &&
+                            !LUA_GLOBAL_LIB.has(init0) &&
+                            vars !== init0
                         ) {
                             scopePrefix = `globalThis.`;
-                            needCreateClass = value.indexOf("l2j.require") < 0;
+                            needCreateClass = init0.indexOf("l2j.require") < 0;
 
                             // if (value.indexOf("l2j.require") >= 0) {
                             //     // require出来的直接赋值
@@ -780,31 +795,42 @@ function ast2jsImp(ast, joiner) {
                             //     scopePrefix = "let ";
                             // }
                             // if (l2jInitedGlobalVars.has(v)) throw new Error(`duplicated global var inited: ${v}`);
-                            l2jInitedGlobalVars.add(v);
+                            l2jInitedGlobalVars.add(vars);
                         }
 
-                        if (LUA_SYSTEM_LIB.has(value)) {
-                            value = `l2j.${value}`;
+                        if (LUA_SYSTEM_LIB.has(init0)) {
+                            init0 = `l2j.${init0}`;
                         }
 
                         // 如果文件名和定义的local名一样，则认为是class
+                        let fileName = path.basename(sourceFilePath).replace(path.extname(sourceFilePath), "");
                         if (
-                            v === "M" ||
-                            v == path.basename(sourceFilePath).replace(path.extname(sourceFilePath), "") ||
-                            // !hasModuleDefined) ||
+                            vars === "M" ||
+                            vars == fileName ||
                             needCreateClass
+                            // !hasModuleDefined) ||
                         ) {
-                            // hasModuleDefined = true;
-                            return `${scopePrefix}${v} = l2j.createClass(${value})`;
+                            hasModuleDefined = true;
+                            if (
+                                init0 === "M" ||
+                                init0.startsWith("setmetatable") ||
+                                (init0 === fileName && vars === "M")
+                            )
+                                return `${scopePrefix}${vars} = ${init0}`;
+                            else return `${scopePrefix}${vars} = l2j.createClass(${init0})`;
                         } else {
-                            if (LUA_GLOBAL_LIB.has(value) || value === v) value = `globalThis.${value}`;
-                            return `${scopePrefix}${v} = ${value}`;
+                            if (LUA_GLOBAL_LIB.has(init0) || init0 === vars) init0 = `globalThis.${init0}`;
+                            else if (init0.startsWith("l2j.string.find")) {
+                                if (!vars.startsWith(`[`)) vars = `[${vars}]`;
+                                init0 = init0.replace(`l2j.string.find`, `l2j.string.findWithRet`);
+                            }
+                            return `${scopePrefix}${vars} = ${init0}`;
                         }
                     default:
                         tagVarargAsSpread(ast.init);
-                        value = smartPack(ast.init);
-                        if (LUA_GLOBAL_LIB.has(value)) value = `globalThis.${value}`;
-                        return `${scopePrefix}${smartPack(ast.variables)} = ${value}`;
+                        let init = smartPack(ast.init).replace(`l2j.string.find`, `l2j.string.findWithRet`);
+                        if (LUA_GLOBAL_LIB.has(init0)) init0 = `globalThis.${init}`;
+                        return `${scopePrefix}${vars} = ${init}`;
                 }
             case "UnaryExpression":
                 let exp = ast2js(ast.argument);
@@ -813,7 +839,7 @@ function ast2jsImp(ast, joiner) {
                         return `!${exp}`;
                     case "#":
                         // return `(${exp}).length`;
-                        return `l2j.string_len(${exp})`;
+                        return `l2j.string.len(${exp})`;
                     default:
                         // lch begin
                         let funcName = verifyUnaryExpression(ast.operator);
@@ -1062,6 +1088,9 @@ function ast2jsImp(ast, joiner) {
                         };
                     }
                     return `${ast2js(ast.base)}.call(this${rest.length > 0 ? ", " : ""}${rest.map(ast2js).join(", ")})`;
+                } else if (ast.base.type === "Identifier" && LUA_META_CALLER.has(ast.base.name)) {
+                    tagVarargAsSpread(ast.arguments);
+                    return `${ast2js(ast.base)}.__call(${ast.arguments.map(ast2js).join(", ")})`;
                 } else {
                     tagVarargAsSpread(ast.arguments);
                     return `${ast2js(ast.base)}(${ast.arguments.map(ast2js).join(", ")})`;
