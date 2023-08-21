@@ -29,6 +29,7 @@ let LUA_GLOBAL_LIB = new Set(
         "pairs",
         "print",
         "next",
+        "assert",
     ])
 );
 
@@ -60,6 +61,7 @@ let globalVarNeedDefine = undefined;
 let sourceFilePath;
 let scopeStack = [];
 let declaredClasses = new Set();
+let hasSelfCall = false;
 
 const LUA_PARSER_OPTIONS = {
     comments: true,
@@ -133,7 +135,7 @@ function toCamel(s) {
     else if (s === "new") return "varNew";
     else if (s === "import") return "varImport";
     else if (s === "package") return "varPackage";
-    // else if (s === "type") return "varType";
+    else if (s === "typeof") return "l2j.typeof";
     // else if (LUA_GLOBAL_LIB.has(s)) return `l2j_${s}`;
     return s;
     // let status = -1;
@@ -203,6 +205,7 @@ const binaryOpMap = {
     "~=": "!==",
 };
 function traverseAst(ast, callback) {
+    astStack.push(ast);
     if (ast instanceof Array) {
         for (let i = 0; i < ast.length; i++) {
             traverseAst(ast[i], callback);
@@ -218,6 +221,7 @@ function traverseAst(ast, callback) {
         }
     } else {
     }
+    astStack.pop();
 }
 function insertPrototypeNode(base) {
     return {
@@ -329,6 +333,9 @@ function isTypeCall(ast) {
 }
 
 // lch begin
+function getThisVarName() {
+    return isTopScope() ? "this" : "thisArg";
+}
 function isLuaRequireFunc(ast) {
     return ast.base?.type === "Identifier" && ast.base?.name === "require";
 }
@@ -448,15 +455,15 @@ function verifyBinaryExpression(ast, op) {
 
     switch (op) {
         case "+":
-            if (!isASTLeftOrRightType(ast, "NumericLiteral")) return "l2j.add";
+            return "l2j.add";
         case "-":
-            if (!isASTLeftOrRightType(ast, "NumericLiteral")) return "l2j.sub";
+            return "l2j.sub";
         case "*":
             return "l2j.mul";
         case "/":
             return "l2j.div";
         case "==":
-            if (!isASTLeftOrRightType(ast, "NumericLiteral")) return "l2j.eq";
+            return "l2j.eq";
     }
 }
 
@@ -469,7 +476,7 @@ function verifyUnaryExpression(op) {
 
 function luaType2JsTypeof(ast) {
     // tansform lua type(foo) js typeof(foo)
-    return `typeof(${ast2js(ast.arguments[0])})`;
+    return `l2j.luaType(${ast2js(ast.arguments[0])})`;
 }
 // {
 //       "type": "AssignmentStatement",
@@ -605,12 +612,14 @@ function luaFormat2JsTemplate(ast) {
 }
 function selfToThis(ast) {
     if (ast.type === "Identifier" && ast.name === "self") {
-        ast.name = "this";
+        ast.name = getThisVarName();
+        hasSelfCall = true;
     }
 }
 function clsToThis(ast) {
     if (ast.type === "Identifier" && ast.name === "cls") {
-        ast.name = "this";
+        ast.name = getThisVarName();
+        hasSelfCall = true;
     }
 }
 function smartPack(args) {
@@ -822,6 +831,8 @@ function ast2jsImp(ast, joiner) {
                             hasModuleDefined = true;
                             if (
                                 !isTopScope() ||
+                                init0.startsWith("CS.") ||
+                                init0.startsWith("Tweening.") ||
                                 init0 === "M" ||
                                 init0.startsWith("setmetatable") ||
                                 (init0 === fileName && vars === "M") ||
@@ -853,7 +864,7 @@ function ast2jsImp(ast, joiner) {
                         return `!${exp}`;
                     case "#":
                         // return `(${exp}).length`;
-                        return `l2j.string.len(${exp})`;
+                        return `l2j.table.length(${exp})`;
                     default:
                         // lch begin
                         let funcName = verifyUnaryExpression(ast.operator);
@@ -964,6 +975,7 @@ function ast2jsImp(ast, joiner) {
             case "ElseifClause":
                 return `else if (${ast2js(ast.condition)}) {${ast2js(ast.body)}}`;
             case "FunctionDeclaration":
+                if (isTopScope()) hasSelfCall = false;
                 tagVarargAsSpread(ast.parameters);
                 if (ast.isClassMode) {
                     let firstParamsName = ast.parameters[0]?.name;
@@ -1006,7 +1018,18 @@ function ast2jsImp(ast, joiner) {
                     ast.parameters.forEach((v) => {
                         localVarStacks[localVarStacks.length - 1].add(v.name);
                     });
-                    let main = `(${ast.parameters.map(ast2js).join(", ")}){${ast2js(ast.body)}}`;
+                    let args = ast.parameters.map(ast2js).join(", ");
+                    let body = ast2js(ast.body);
+                    let main;
+                    if (isTopScope() && hasSelfCall) {
+                        // 处理this在回调中引用的问题，在js中回调里引的this不对
+                        main = `(${args}){let thisArg = this;\n${body}}`;
+                    } else {
+                        main = `(${args}){${body}}`;
+                    }
+                    if (isTopScope()) hasSelfCall = false;
+
+                    `(${args}){${body}}`;
                     if (ast.identifier == null) {
                         return `function ${main}`;
                     } else {
@@ -1015,7 +1038,11 @@ function ast2jsImp(ast, joiner) {
                             return `${fnName} = function ${main}`;
                         } else {
                             // return `${ast.isLocal ? "let " : ""} ${fn_name} = function ${fn_name}${main}`;
-                            return `function ${fnName}${main}`;
+                            let ret = `function ${fnName}${main}`;
+                            if (!ast.isLocal) {
+                                ret += `\n_G.${fnName} = ${fnName};\n`;
+                            }
+                            return ret;
                         }
                     }
                 }
@@ -1084,7 +1111,7 @@ function ast2jsImp(ast, joiner) {
                     return convertLuaSystemFunc(ast);
                 } else if (isLuaRequireFunc(ast)) {
                     return convertLuaRequireFunc(ast);
-                } else if (ast.arguments[0]?.name == "this") {
+                } else if (ast.arguments[0]?.name == getThisVarName()) {
                     tagVarargAsSpread(ast.arguments);
                     let rest = ast.arguments.slice(1);
                     if (ast.base.base) {
@@ -1098,13 +1125,52 @@ function ast2jsImp(ast, joiner) {
                             base: ast.base.base,
                         };
                     }
-                    return `${ast2js(ast.base)}.call(this${rest.length > 0 ? ", " : ""}${rest.map(ast2js).join(", ")})`;
+                    hasSelfCall = true;
+                    let firstArg = "";
+                    if (ast.base.indexer === ":") {
+                        // 第一个参数是self的，如果是成员函数, 比如base:xxx(self,1,2,3)这种需要翻译成this.xxx(this, 1,2,3)
+                        return `${getThisVarName()}.${ast2js(ast.base)}(${firstArg}${getThisVarName()}${
+                            rest.length > 0 ? ", " : ""
+                        }${rest.map(ast2js).join(", ")})`;
+                    } else {
+                        // return `${ast2js(ast.base)}.call(${getThisVarName()}${
+                        //     rest.length > 0 ? ", " : ""
+                        // }${rest.map(ast2js).join(", ")})`;
+                        // // 这里并不知道掉的是成员函数还是静态函数，所以只能运行时判断，运行时要根据是否是成员函数吃掉第一个参数
+                        return `l2j.callFunc(${ast2js(ast.base)}${ast.arguments.length > 0 ? "," : ""}${ast.arguments
+                            .map(ast2js)
+                            .join(", ")})`;
+                    }
                 } else if (ast.base.type === "Identifier" && LUA_META_CALLER.has(ast.base.name)) {
                     tagVarargAsSpread(ast.arguments);
                     return `${ast2js(ast.base)}.__call(${ast.arguments.map(ast2js).join(", ")})`;
+                } else if (ast.base.type === "Identifier" && ast.base.name === "assert") {
+                    tagVarargAsSpread(ast.arguments);
+                    return `l2j.${ast2js(ast.base)}(${ast.arguments.map(ast2js).join(", ")})`;
                 } else {
                     tagVarargAsSpread(ast.arguments);
-                    return `${ast2js(ast.base)}(${ast.arguments.map(ast2js).join(", ")})`;
+                    let funcName = ast2js(ast.base);
+                    let body = ast.arguments.map(ast2js).join(", ");
+                    let firstArgType = ast.arguments.length > 0 ? ast.arguments[0].type : undefined;
+                    if (
+                        funcName.startsWith("CS.") ||
+                        ast.arguments.length === 0 ||
+                        ast.base.indexer === ":" ||
+                        LUA_GLOBAL_LIB.has(funcName) ||
+                        l2jGlobalVars.has(funcName) ||
+                        firstArgType === "StringLiteral" ||
+                        firstArgType === "NumericLiteral" ||
+                        firstArgType === "NilLiteral" ||
+                        firstArgType === "BooleanLiteral" ||
+                        firstArgType === "TableConstructorExpression" ||
+                        body.startsWith("CS.") ||
+                        body.startsWith("l2j.")
+                    ) {
+                        return `${funcName}(${body})`;
+                    } else {
+                        // 这里并不知道掉的是成员函数还是静态函数，所以只能运行时判断
+                        return `l2j.callFunc(${funcName}, ${body})`;
+                    }
                 }
             case "TableCallExpression":
                 if (ast.base.type == "Identifier" && ast.base?.name == "class") {
