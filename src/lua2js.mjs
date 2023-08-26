@@ -47,6 +47,8 @@ let LUA_META_CALLER = new Set([
     "Vector4",
 ]);
 
+let LUA_PROTOTYPE_CALL_KEY = new Set(["super", "callFunc", "toplevel"]);
+
 let l2jSystemFuncs = new Set();
 let l2jGlobalVars = new Set();
 let l2jInitedGlobalVars = new Set();
@@ -62,7 +64,12 @@ let sourceFilePath;
 let scopeStack = [];
 let declaredClasses = new Set();
 let hasSelfCall = false;
+
 let currentFileName = "";
+let currentClassName = undefined;
+let localThisArgUsed = false;
+let outsideClassString = "";
+let classKeyStringDefined = undefined;
 
 const LUA_PARSER_OPTIONS = {
     comments: true,
@@ -115,6 +122,10 @@ function initGlobalVars(source, ast, asESM) {
     hasModuleDefined = false;
     globalVarNeedDefine = undefined;
     declaredClasses = new Set();
+    currentClassName = undefined;
+    localThisArgUsed = false;
+    outsideClassString = "";
+    classKeyStringDefined = undefined;
 
     sourceFilePath = source;
     currentFileName = path.basename(sourceFilePath).replace(path.extname(sourceFilePath), "");
@@ -126,6 +137,48 @@ function initGlobalVars(source, ast, asESM) {
     }
     createCommentData(ast);
 }
+
+function setCurrentClassName(name) {
+    currentClassName = name.replaceAll(".", "_");
+    // if (currentClassName !== undefined && astStack.length > 1) {
+    //     let ast = astStack[astStack.length - 2];
+    //     if (ast instanceof Array) {
+    //         ast.forEach((v) => (v.isClassMode = true));
+    //     }
+    // }
+}
+
+function isInFunctionDeclaration() {
+    for (let i = astStack.length - 1; i >= 0; i--) {
+        let ast = astStack[i];
+        if (!(ast instanceof Array) && ast.type === "FunctionDeclaration") {
+            return true;
+        }
+    }
+    return false;
+}
+
+function isInLocalFunction() {
+    let stack = 0;
+    for (let i = astStack.length - 1; i >= 0; i--) {
+        let ast = astStack[i];
+        if (!(ast instanceof Array) && ast.type === "FunctionDeclaration") {
+            if (++stack >= 2) return true;
+        }
+    }
+    return false;
+}
+
+function isInClassDeclaration() {
+    return currentClassName !== undefined;
+}
+
+function inClassKeyDefined() {
+    return (
+        classKeyStringDefined !== undefined &&
+        (classKeyStringDefined === astStack.length - 1 || classKeyStringDefined === astStack.length - 3)
+    );
+}
 // lch end
 
 function joinUnderscore(length) {
@@ -133,10 +186,10 @@ function joinUnderscore(length) {
 }
 function toCamel(s) {
     if (s === "var") return "varInfo";
-    else if (s === "super") return "varSuper";
-    else if (s === "new") return "varNew";
-    else if (s === "import") return "varImport";
-    else if (s === "package") return "varPackage";
+    else if (s === "super") return "Super";
+    else if (s === "new") return "New";
+    else if (s === "import") return "Import";
+    else if (s === "package") return "Package";
     else if (s === "typeof") return "l2j.typeof";
     // else if (LUA_GLOBAL_LIB.has(s)) return `l2j_${s}`;
     return s;
@@ -337,6 +390,7 @@ function isTypeCall(ast) {
 // lch begin
 function getThisVarName() {
     return isTopScope() ? "this" : "thisArg";
+    // return isInLocalFunction() ? "thisArg" : "this";
 }
 function isLuaRequireFunc(ast) {
     return ast.base?.type === "Identifier" && ast.base?.name === "require";
@@ -616,12 +670,14 @@ function selfToThis(ast) {
     if (ast.type === "Identifier" && ast.name === "self") {
         ast.name = getThisVarName();
         hasSelfCall = true;
+        // if (isInLocalFunction()) localThisArgUsed = true;
     }
 }
 function clsToThis(ast) {
     if (ast.type === "Identifier" && ast.name === "cls") {
         ast.name = getThisVarName();
         hasSelfCall = true;
+        // if (isInLocalFunction()) localThisArgUsed = true;
     }
 }
 function smartPack(args) {
@@ -927,7 +983,7 @@ function ast2jsImp(ast, joiner) {
                         // return `{${ast2js(ast.fields, ", ")}}`;
                         let types = new Set();
                         ast.fields.forEach((e) => types.add(e.type));
-                        if (types.size === 1) return `{${ast2js(ast.fields, ", ")}}`;
+                        if (types.size === 1) return `{${ast2js(ast.fields, inClassKeyDefined() ? ";" : ", ")}}`;
                         else {
                             let ret = "{";
                             for (let i = 0; i < ast.fields.length; ++i) {
@@ -955,7 +1011,7 @@ function ast2jsImp(ast, joiner) {
                         return `${ast2js(ast.key)} = ${ast2js(ast.value)}`;
                     }
                 } else {
-                    return `${ast2js(ast.key)}: ${ast2js(ast.value)}`;
+                    return `${ast2js(ast.key)}${inClassKeyDefined() ? "=" : ":"} ${ast2js(ast.value)}`;
                 }
             case "TableKey":
                 return `[${ast2js(ast.key)}]: ${ast2js(ast.value)}`;
@@ -979,23 +1035,40 @@ function ast2jsImp(ast, joiner) {
                 return `else if (${ast2js(ast.condition)}) {${ast2js(ast.body)}}`;
             case "FunctionDeclaration":
                 if (isTopScope()) hasSelfCall = false;
+                // if (!isInLocalFunction()) localThisArgUsed = false;
                 tagVarargAsSpread(ast.parameters);
                 if (ast.isClassMode) {
-                    let firstParamsName = ast.parameters[0]?.name;
-                    switch (firstParamsName) {
-                        case "self":
-                            traverseAst(ast.body, selfToThis);
-                            return `${ast2js(ast.identifier)}(${ast2js(ast.parameters.slice(1), ", ")}) {${ast2js(
-                                ast.body
-                            )}}`;
-                        case "cls":
-                            traverseAst(ast.body, clsToThis);
-                            return `static ${ast2js(ast.identifier)}(${ast2js(
-                                ast.parameters.slice(1),
-                                ", "
-                            )}) {${ast2js(ast.body)}}`;
-                        default:
-                            return `${ast2js(ast.identifier)}(${ast2js(ast.parameters, ", ")}) {${ast2js(ast.body)}}`;
+                    // let firstParamsName = ast.parameters[0]?.name;
+                    // switch (firstParamsName) {
+                    //     case "self":
+                    //         traverseAst(ast.body, selfToThis);
+                    //         return `${ast2js(ast.identifier)}(${ast2js(ast.parameters.slice(1), ", ")}) {${ast2js(
+                    //             ast.body
+                    //         )}}`;
+                    //     case "cls":
+                    //         traverseAst(ast.body, clsToThis);
+                    //         return `static ${ast2js(ast.identifier)}(${ast2js(
+                    //             ast.parameters.slice(1),
+                    //             ", "
+                    //         )}) {${ast2js(ast.body)}}`;
+                    //     default:
+                    //         return `${ast2js(ast.identifier)}(${ast2js(ast.parameters, ", ")}) {${ast2js(ast.body)}}`;
+                    // }
+                    if (ast.identifier?.type == "MemberExpression") {
+                        traverseAst(ast.body, selfToThis);
+                        let ret = "";
+
+                        if (ast.identifier?.indexer == ":") {
+                            ret = `${ast2js(ast.identifier.identifier)}(${ast2js(ast.parameters, ",")}) {`;
+                        } else if (ast.identifier?.indexer == ".") {
+                            ret = `static ${ast2js(ast.identifier.identifier)}(${ast2js(ast.parameters, ",")}) {`;
+                        }
+
+                        let body = ast2js(ast.body);
+                        if (localThisArgUsed) ret += ";let thisArg = this;";
+                        return ret + body + "}";
+                    } else {
+                        throw new Error(`unexpected ast.identifier?.type: ${ast.identifier?.type}`);
                     }
                 } else {
                     if (
@@ -1021,18 +1094,22 @@ function ast2jsImp(ast, joiner) {
                     ast.parameters.forEach((v) => {
                         localVarStacks[localVarStacks.length - 1].add(v.name);
                     });
+
                     let args = ast.parameters.map(ast2js).join(", ");
                     let body = ast2js(ast.body);
                     let main;
+
                     if (isTopScope() && hasSelfCall) {
+                        // if (localThisArgUsed) {
                         // 处理this在回调中引用的问题，在js中回调里引的this不对
                         main = `(${args}){let thisArg = this;\n${body}}`;
+                        localThisArgUsed = false;
                     } else {
                         main = `(${args}){${body}}`;
                     }
                     if (isTopScope()) hasSelfCall = false;
 
-                    `(${args}){${body}}`;
+                    // `(${args}){${body}}`;
                     if (ast.identifier == null) {
                         return `function ${main}`;
                     } else {
@@ -1131,16 +1208,25 @@ function ast2jsImp(ast, joiner) {
                     hasSelfCall = true;
                     let firstArg = "";
                     let funcName = ast2js(ast.base);
+                    // if (isInLocalFunction()) localThisArgUsed = true;
                     if (ast.base.indexer === ":") {
                         // 第一个参数是self的，如果是成员函数, 比如base:xxx(self,1,2,3)这种需要翻译成this.xxx(this, 1,2,3)
                         return `${getThisVarName()}.${funcName}(${firstArg}${getThisVarName()}${
                             rest.length > 0 ? ", " : ""
                         }${rest.map(ast2js).join(", ")})`;
-                    } else if (funcName.indexOf("prototype") >= 0) {
-                        return `${funcName}.call(${getThisVarName()}${rest.length > 0 ? ", " : ""}${rest
-                            .map(ast2js)
-                            .join(", ")})`;
                     } else {
+                        let needAddCall = funcName.indexOf("prototype") >= 0;
+                        for (let key of LUA_PROTOTYPE_CALL_KEY)
+                            if (funcName.indexOf(key) > 0) {
+                                funcName = funcName.replaceAll(".prototype", "");
+                                needAddCall = true;
+                                break;
+                            }
+                        if (needAddCall) {
+                            return `${funcName}.call(${getThisVarName()}${rest.length > 0 ? ", " : ""}${rest
+                                .map(ast2js)
+                                .join(", ")})`;
+                        }
                         // return `${ast2js(ast.base)}.call(${getThisVarName()}${
                         //     rest.length > 0 ? ", " : ""
                         // }${rest.map(ast2js).join(", ")})`;
@@ -1265,6 +1351,12 @@ function lua2js(lua_code, source, asESM) {
         // lch end
 
         js = ast2js(ast);
+
+        // if (outsideClassString.length > 0) {
+        //     // 在最前面前插入
+        //     js = outsideClassString + "\n" + js;
+        // }
+
         return prettier.format(js, { parser: "babel", rules: { "no-debugger": "off" }, plugins: [parserBabel] });
     } catch (error) {
         let ret = `/*\n${error}\n*/\n${js}`;
