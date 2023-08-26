@@ -523,6 +523,29 @@ function verifyBinaryExpression(ast, op) {
     }
 }
 
+function verifyLogicExpression(ast, op) {
+    let needConvert = false;
+    for (let i = astStack.length - 1; i >= 0; --i) {
+        let t = astStack[i].type;
+        if (t === "LocalStatement" || t === "AssignmentStatement") {
+            needConvert = true;
+            break;
+        } else if (t === "FunctionDeclaration") {
+            break;
+        }
+    }
+    if (!needConvert) return;
+
+    // console.log(`logic expression converted, file: ${sourceFilePath}, line: ${ast.loc.start.line}`);
+    // lua的and和or和js有细微差别，比如 c = 0 and(or) 1，两者结果不同
+    switch (op) {
+        case "||":
+            return "l2j.or";
+        case "&&":
+            return "l2j.and";
+    }
+}
+
 function verifyUnaryExpression(op) {
     if (!replaceOperatorToFunc) return;
 
@@ -955,6 +978,9 @@ function ast2jsImp(ast, joiner) {
             case "VarargLiteral":
                 return ast.asSpread ? "...varargs" : ast.asArray ? "[...varargs]" : "varargs[0]";
             case "LogicalExpression":
+                let replacedFuncName = verifyLogicExpression(ast, binaryOpMap[ast.operator] || ast.operator);
+                if (replacedFuncName) return `${replacedFuncName}(${ast2js(ast.left)}, ${ast2js(ast.right)})`;
+
                 return `(${ast2js(ast.left)} ${binaryOpMap[ast.operator] || ast.operator} ${ast2js(ast.right)})`;
             case "TableConstructorExpression":
                 if (ast.isClassMode) {
@@ -1194,6 +1220,13 @@ function ast2jsImp(ast, joiner) {
                 } else if (ast.arguments[0]?.name == getThisVarName()) {
                     tagVarargAsSpread(ast.arguments);
                     let rest = ast.arguments.slice(1);
+
+                    if (l2jGlobalVars.has(ast.base.base?.name)) {
+                        return `${ast2js(ast.base)}(${getThisVarName()}${rest.length > 0 ? ", " : ""}${rest
+                            .map(ast2js)
+                            .join(", ")})`;
+                    }
+
                     if (ast.base.base) {
                         ast.base.base = {
                             type: "MemberExpression",
