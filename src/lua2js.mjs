@@ -1018,12 +1018,12 @@ function ast2jsImp(ast, joiner) {
             case "TableValue":
                 return ast2js(ast.value);
             case "IndexExpression":
-                if (ast.index?.type == "NumericLiteral" && ast.index.value >= 1) {
-                    ast.index.value = ast.index.value - 1;
-                    return `${ast2js(ast.base)}[${ast2js(ast.index)}]`;
-                } else {
-                    return `${ast2js(ast.base)}[${ast2js(ast.index)}]`;
-                }
+                // if (ast.index?.type == "NumericLiteral" && ast.index.value >= 1) {
+                //     ast.index.value = ast.index.value - 1;
+                //     return `${ast2js(ast.base)}[${ast2js(ast.index)}]`;
+                // } else {
+                return `${ast2js(ast.base)}[${ast2js(ast.index)}]`;
+            // }
 
             case "IfStatement":
                 return ast.clauses.map(ast2js).join("\n");
