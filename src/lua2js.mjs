@@ -48,7 +48,7 @@ let LUA_META_CALLER = new Set([
 ]);
 
 let LUA_REMOVE_PROTOTYPE_KEY = new Set(["super", "callFunc", "toplevel"]);
-let LUA_ADD_PROTOTYPE_KEY = new Set(["listener[2]"]);
+let LUA_ADD_CALL_KEY = new Set(["listener[2]"]);
 
 let l2jSystemFuncs = new Set();
 let l2jGlobalVars = new Set();
@@ -979,8 +979,24 @@ function ast2jsImp(ast, joiner) {
             case "VarargLiteral":
                 return ast.asSpread ? "...varargs" : ast.asArray ? "[...varargs]" : "varargs[0]";
             case "LogicalExpression":
+                let op = ast.operator;
+                if (op === "or" && ast.left?.operator === "and" && ast.right?.type !== "LogicalExpression") {
+                    return `(l2j.condition(${ast2js(ast.left.left)}) ? (${ast2js(ast.left.right)}): (${ast2js(
+                        ast.right
+                    )}))`;
+                }
+
                 let replacedFuncName = verifyLogicExpression(ast, binaryOpMap[ast.operator] || ast.operator);
-                if (replacedFuncName) return `${replacedFuncName}(${ast2js(ast.left)}, ${ast2js(ast.right)})`;
+                if (replacedFuncName) {
+                    let left = ast2js(ast.left);
+                    let right = ast2js(ast.right);
+                    if (op === "and") {
+                        return `(l2j.condition(${left}) ? ${right} : ${left})`;
+                    } else if (op === "or") {
+                        return `(l2j.condition(${left}) ? ${left} : ${right})`;
+                    }
+                    // return `${replacedFuncName}(${ast2js(ast.left)}, ${ast2js(ast.right)})`;
+                }
 
                 return `(${ast2js(ast.left)} ${binaryOpMap[ast.operator] || ast.operator} ${ast2js(ast.right)})`;
             case "TableConstructorExpression":
@@ -1282,16 +1298,19 @@ function ast2jsImp(ast, joiner) {
                 } else {
                     tagVarargAsSpread(ast.arguments);
                     let funcName = ast2js(ast.base);
-                    for (let v of LUA_ADD_PROTOTYPE_KEY) {
-                        if (funcName.indexOf(v) >= 0) {
-                            funcName += ".prototype";
-                            break;
+                    let addCall = funcName.indexOf("prototype") >= 0;
+                    if (!addCall) {
+                        for (let v of LUA_ADD_CALL_KEY) {
+                            if (funcName.indexOf(v) >= 0) {
+                                addCall = true;
+                                break;
+                            }
                         }
                     }
-                    let body = ast.arguments.map(ast2js).join(", ");
 
+                    let body = ast.arguments.map(ast2js).join(", ");
                     // let firstArgType = ast.arguments.length > 0 ? ast.arguments[0].type : undefined;
-                    if (funcName.indexOf("prototype") >= 0) {
+                    if (addCall) {
                         return `${funcName}.call(${body})`;
                     } else {
                         return `${funcName}(${body})`;
