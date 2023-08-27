@@ -397,7 +397,7 @@ function isLuaRequireFunc(ast) {
     return ast.base?.type === "Identifier" && ast.base?.name === "require";
 }
 function convertLuaRequireFunc(ast) {
-    return `l2j.require(${ast.arguments?.map(ast2js).join(", ").replace(/\./g, "/")})`;
+    return `l2j.require(${ast.arguments?.map(ast2js).join(", ")})`;
 }
 
 function isLuaSystemFunc(ast) {
@@ -1021,7 +1021,17 @@ function ast2jsImp(ast, joiner) {
                     let is_pure_array = ast.fields.every((e) => e.type == "TableValue");
                     if (is_pure_array) {
                         tagVarargAsSpread(ast.fields.map((e) => e.value));
-                        return `[${ast2js(ast.fields, ", ")}]`;
+
+                        let ret = "{";
+                        for (let i = 0; i < ast.fields.length; ++i) {
+                            let value = ast2js(ast.fields[i]);
+                            if (value.indexOf("...") !== -1)
+                                return `l2j.convertJsArrayToLuaTable([${ast2js(ast.fields, ", ")}])`;
+                            ret += `${i + 1}: (${value}),`;
+                        }
+                        ret += "}";
+                        return ret;
+                        // return `[${ast2js(ast.fields, ", ")}]`;
                     } else {
                         // return `{${ast2js(ast.fields, ", ")}}`;
                         let types = new Set();
@@ -1260,10 +1270,14 @@ function ast2jsImp(ast, joiner) {
                     let funcName = ast2js(ast.base);
                     // if (isInLocalFunction()) localThisArgUsed = true;
                     if (ast.base.indexer === ":") {
-                        // 第一个参数是self的，如果是成员函数, 比如base:xxx(self,1,2,3)这种需要翻译成this.xxx(this, 1,2,3)
-                        return `${getThisVarName()}.${funcName}(${firstArg}${getThisVarName()}${
-                            rest.length > 0 ? ", " : ""
-                        }${rest.map(ast2js).join(", ")})`;
+                        if (!funcName.startsWith("this.") && !funcName.startsWith("thisArg.")) {
+                            // 第一个参数是self的，如果是成员函数, 比如base:xxx(self,1,2,3)这种需要翻译成this.xxx(this, 1,2,3)
+                            return `${getThisVarName()}.${funcName}(${firstArg}${getThisVarName()}${
+                                rest.length > 0 ? ", " : ""
+                            }${rest.map(ast2js).join(", ")})`;
+                        } else {
+                            return `${funcName.replaceAll("prototype.", "")}(${ast.arguments.map(ast2js).join(", ")})`;
+                        }
                     } else {
                         let needAddCall = funcName.indexOf("prototype") >= 0;
                         for (let key of LUA_REMOVE_PROTOTYPE_KEY)
