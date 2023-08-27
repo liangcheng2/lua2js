@@ -47,7 +47,8 @@ let LUA_META_CALLER = new Set([
     "Vector4",
 ]);
 
-let LUA_PROTOTYPE_CALL_KEY = new Set(["super", "callFunc", "toplevel"]);
+let LUA_REMOVE_PROTOTYPE_KEY = new Set(["super", "callFunc", "toplevel"]);
+let LUA_ADD_PROTOTYPE_KEY = new Set(["listener[2]"]);
 
 let l2jSystemFuncs = new Set();
 let l2jGlobalVars = new Set();
@@ -1249,7 +1250,7 @@ function ast2jsImp(ast, joiner) {
                         }${rest.map(ast2js).join(", ")})`;
                     } else {
                         let needAddCall = funcName.indexOf("prototype") >= 0;
-                        for (let key of LUA_PROTOTYPE_CALL_KEY)
+                        for (let key of LUA_REMOVE_PROTOTYPE_KEY)
                             if (funcName.indexOf(key) > 0) {
                                 funcName = funcName.replaceAll(".prototype", "");
                                 needAddCall = true;
@@ -1281,7 +1282,14 @@ function ast2jsImp(ast, joiner) {
                 } else {
                     tagVarargAsSpread(ast.arguments);
                     let funcName = ast2js(ast.base);
+                    for (let v of LUA_ADD_PROTOTYPE_KEY) {
+                        if (funcName.indexOf(v) >= 0) {
+                            funcName += ".prototype";
+                            break;
+                        }
+                    }
                     let body = ast.arguments.map(ast2js).join(", ");
+
                     // let firstArgType = ast.arguments.length > 0 ? ast.arguments[0].type : undefined;
                     if (funcName.indexOf("prototype") >= 0) {
                         return `${funcName}.call(${body})`;
