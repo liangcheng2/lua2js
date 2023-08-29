@@ -180,6 +180,18 @@ function inClassKeyDefined() {
         (classKeyStringDefined === astStack.length - 1 || classKeyStringDefined === astStack.length - 3)
     );
 }
+
+function isFunctionParameter(name) {
+    for (let i = astStack.length - 2; i >= 0; i--) {
+        let ast = astStack[i];
+        if (ast.type === "FunctionDeclaration") {
+            for (let p of ast.parameters) {
+                if (p.name === name) return true;
+            }
+        }
+    }
+    return false;
+}
 // lch end
 
 function joinUnderscore(length) {
@@ -879,7 +891,8 @@ function ast2jsImp(ast, joiner) {
                             (l2jGlobalVars.has(vars) || LUA_META_CALLER.has(vars)) &&
                             !LUA_GLOBAL_LIB.has(vars) &&
                             !LUA_GLOBAL_LIB.has(init0) &&
-                            vars !== init0
+                            vars !== init0 &&
+                            !isFunctionParameter(vars)
                         ) {
                             scopePrefix = `globalThis.`;
                             needCreateClass = init0.indexOf("l2j.require") < 0;
@@ -927,8 +940,9 @@ function ast2jsImp(ast, joiner) {
                                 return `${scopePrefix}${vars} = l2j.createClass(${init0})`;
                             }
                         } else {
-                            if (LUA_GLOBAL_LIB.has(init0) || init0 === vars) init0 = `globalThis.${init0}`;
-                            else if (init0.startsWith("l2j.string.find")) {
+                            if ((LUA_GLOBAL_LIB.has(init0) || init0 === vars) && !isFunctionParameter(init0)) {
+                                init0 = `globalThis.${init0}`;
+                            } else if (init0.startsWith("l2j.string.find")) {
                                 if (!vars.startsWith(`[`)) vars = `[${vars}]`;
                                 init0 = init0.replace(`l2j.string.find`, `l2j.string.findWithRet`);
                             }
@@ -1019,6 +1033,7 @@ function ast2jsImp(ast, joiner) {
                     return "{}";
                 } else {
                     let is_pure_array = ast.fields.every((e) => e.type == "TableValue");
+                    // if(!is_pure_array) ast.field.every((e)=>e.type === "TableKey" && e.type === "")
                     if (is_pure_array) {
                         tagVarargAsSpread(ast.fields.map((e) => e.value));
 
